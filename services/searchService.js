@@ -250,6 +250,7 @@ const buildGeminiParts = (query, results, attachments, options = {}) => {
     }));
 
   return [
+    ...inlineParts,
     {
       text: `You are a premium AI search assistant. Understand the user's intent before answering.
 
@@ -281,8 +282,146 @@ ${attachmentContext || "None"}
 Web sources:
 ${context || "None"}`,
     },
-    ...inlineParts,
   ];
+};
+
+const buildGeminiTextPrompt = (query, results, attachments, options = {}) => {
+  const textPart = buildGeminiParts(query, results, attachments, options).find(
+    (part) => part.text
+  );
+
+  return textPart?.text || query;
+};
+
+const getGeminiErrorMessage = (error) =>
+  error.response?.data?.error?.message || error.message || "Unknown Gemini error";
+
+const uploadGeminiFile = async (file) => {
+  const buffer = Buffer.from(file.inlineData.data, "base64");
+  const mimeType = file.inlineData.mimeType;
+  const displayName = file.name || "attached-file.pdf";
+
+  const startResponse = await http.post(
+    "https://generativelanguage.googleapis.com/upload/v1beta/files",
+    {
+      file: {
+        display_name: displayName,
+      },
+    },
+    {
+      params: {
+        key: process.env.GEMINI_API_KEY,
+      },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": buffer.length,
+        "X-Goog-Upload-Header-Content-Type": mimeType,
+      },
+    }
+  );
+
+  const uploadUrl = startResponse.headers["x-goog-upload-url"];
+
+  if (!uploadUrl) {
+    throw new Error("Gemini did not return an upload URL");
+  }
+
+  const uploadResponse = await http.post(uploadUrl, buffer, {
+    headers: {
+      "Content-Length": buffer.length,
+      "Content-Type": mimeType,
+      "X-Goog-Upload-Offset": "0",
+      "X-Goog-Upload-Command": "upload, finalize",
+    },
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+  });
+
+  return uploadResponse.data.file;
+};
+
+const waitForGeminiFile = async (file) => {
+  if (!file?.name || file.state === "ACTIVE" || !file.state) {
+    return file;
+  }
+
+  let currentFile = file;
+
+  for (let attempt = 0; attempt < 8 && currentFile.state === "PROCESSING"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    const { data } = await http.get(
+      `https://generativelanguage.googleapis.com/v1beta/${currentFile.name}`,
+      {
+        params: {
+          key: process.env.GEMINI_API_KEY,
+        },
+      }
+    );
+
+    currentFile = data;
+  }
+
+  return currentFile;
+};
+
+const generateGeminiFileAnswer = async (query, results, attachments = [], options = {}) => {
+  const pdfFiles = attachments.filter(
+    (file) => file.inlineData?.data && file.inlineData?.mimeType === "application/pdf"
+  );
+
+  if (pdfFiles.length === 0) return null;
+
+  const uploadedFiles = [];
+
+  for (const file of pdfFiles.slice(0, 2)) {
+    const uploadedFile = await waitForGeminiFile(await uploadGeminiFile(file));
+
+    if (uploadedFile.state && uploadedFile.state !== "ACTIVE") {
+      throw new Error(`Gemini file is ${uploadedFile.state}`);
+    }
+
+    uploadedFiles.push(uploadedFile);
+  }
+
+  const fileParts = uploadedFiles.map((file) => ({
+    file_data: {
+      mime_type: file.mimeType || file.mime_type || "application/pdf",
+      file_uri: file.uri,
+    },
+  }));
+
+  const { data } = await http.post(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+    {
+      contents: [
+        {
+          parts: [
+            ...fileParts,
+            {
+              text: buildGeminiTextPrompt(query, results, attachments, options),
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.25,
+        maxOutputTokens: 1400,
+        thinkingConfig: {
+          thinkingBudget: 0,
+        },
+      },
+    },
+    {
+      params: {
+        key: process.env.GEMINI_API_KEY,
+      },
+    }
+  );
+
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || null;
 };
 
 const generateGeminiAnswer = async (query, results, attachments = [], options = {}) => {
@@ -298,30 +437,44 @@ const generateGeminiAnswer = async (query, results, attachments = [], options = 
     return null;
   }
 
-  const { data } = await http.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
-    {
-      contents: [
-        {
-          parts: buildGeminiParts(query, results, attachments, options),
-        },
-      ],
-      generationConfig: {
-        temperature: intent === "creative" ? 0.75 : 0.25,
-        maxOutputTokens: 1200,
-        thinkingConfig: {
-          thinkingBudget: 0,
+  try {
+    const { data } = await http.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      {
+        contents: [
+          {
+            parts: buildGeminiParts(query, results, attachments, options),
+          },
+        ],
+        generationConfig: {
+          temperature: intent === "creative" ? 0.75 : 0.25,
+          maxOutputTokens: 1200,
+          thinkingConfig: {
+            thinkingBudget: 0,
+          },
         },
       },
-    },
-    {
-      params: {
-        key: process.env.GEMINI_API_KEY,
-      },
-    }
-  );
+      {
+        params: {
+          key: process.env.GEMINI_API_KEY,
+        },
+      }
+    );
 
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || null;
+    const inlineAnswer = data.candidates?.[0]?.content?.parts?.[0]?.text || null;
+    if (inlineAnswer) return inlineAnswer;
+
+    console.log("Gemini inline PDF returned no text. Trying File API fallback.");
+  } catch (error) {
+    console.log(`Gemini inline request failed: ${getGeminiErrorMessage(error)}`);
+  }
+
+  try {
+    return await generateGeminiFileAnswer(query, results, attachments, options);
+  } catch (error) {
+    console.log(`Gemini File API fallback failed: ${getGeminiErrorMessage(error)}`);
+    return null;
+  }
 };
 
 const buildAttachmentFallbackAnswer = (attachments = []) => {
