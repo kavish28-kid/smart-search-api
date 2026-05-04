@@ -4,6 +4,7 @@ const attachButton = document.querySelector("#attachButton");
 const attachMenu = document.querySelector("#attachMenu");
 const fileInput = document.querySelector("#fileInput");
 const attachmentTray = document.querySelector("#attachmentTray");
+const fileModeRow = document.querySelector("#fileModeRow");
 const quickSearchRow = document.querySelector("#quickSearchRow");
 const quickClear = document.querySelector("#quickClear");
 const statusBox = document.querySelector("#status");
@@ -20,6 +21,8 @@ const resultsList = document.querySelector("#resultsList");
 const resultCount = document.querySelector("#resultCount");
 const cursorGlow = document.querySelector("#cursorGlow");
 const attachedFiles = [];
+let selectedFileMode = "";
+let lastConversation = null;
 const historyStorageKey = "smart-search-history";
 const inlineFileLimit = 12 * 1024 * 1024;
 const textFileTypes = new Set([
@@ -48,7 +51,12 @@ const buildAttachmentQuery = () => {
   if (attachedFiles.length === 0) return "";
 
   const names = attachedFiles.map((item) => item.file.name).join(", ");
-  return `Explain the attached file${attachedFiles.length > 1 ? "s" : ""}: ${names}`;
+  const modeLabel = fileModeRow
+    .querySelector(`[data-file-mode="${selectedFileMode}"]`)
+    ?.textContent.trim();
+  const instruction = modeLabel ? `${modeLabel} for` : "Explain";
+
+  return `${instruction} the attached file${attachedFiles.length > 1 ? "s" : ""}: ${names}`;
 };
 
 const clearAttachments = () => {
@@ -57,6 +65,7 @@ const clearAttachments = () => {
   }
 
   attachedFiles.length = 0;
+  selectedFileMode = "";
   renderAttachments();
 };
 
@@ -237,6 +246,7 @@ const readJsonResponse = async (response) => {
 const renderAttachments = () => {
   attachmentTray.innerHTML = "";
   attachmentTray.hidden = attachedFiles.length === 0;
+  fileModeRow.hidden = attachedFiles.length === 0;
 
   for (const item of attachedFiles) {
     const chip = document.createElement("article");
@@ -283,6 +293,10 @@ const renderAttachments = () => {
     meta.append(name, size);
     chip.append(preview, meta, remove);
     attachmentTray.appendChild(chip);
+  }
+
+  for (const button of fileModeRow.querySelectorAll("[data-file-mode]")) {
+    button.classList.toggle("is-active", button.dataset.fileMode === selectedFileMode);
   }
 };
 
@@ -341,25 +355,38 @@ const runSearch = async (query) => {
   const cleanQuery = compactText(query) || buildAttachmentQuery();
   if (!cleanQuery) return;
   const hadAttachments = attachedFiles.length > 0;
+  const shouldSendContext = !hadAttachments && Boolean(lastConversation?.lastAnswer);
 
   enterSearchMode();
   input.value = "";
   addHistoryItem(cleanQuery);
   hideResults();
-  setStatus("Searching...");
+  setStatus(
+    hadAttachments
+      ? "Reading attached file..."
+      : shouldSendContext
+        ? "Continuing from the last answer..."
+        : "Searching..."
+  );
   window.dispatchEvent(new CustomEvent("search-start"));
 
   try {
     const attachments = await Promise.all(attachedFiles.map(buildAttachmentPayload));
+    const payload = {
+      q: cleanQuery,
+      attachments,
+      mode: hadAttachments ? selectedFileMode : "",
+      context: shouldSendContext ? lastConversation : null,
+    };
 
     const response =
-      attachments.length > 0
+      attachments.length > 0 || shouldSendContext || selectedFileMode
         ? await fetch("/search", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ q: cleanQuery, attachments }),
+            body: JSON.stringify(payload),
           })
         : await fetch(`/search?q=${encodeURIComponent(cleanQuery)}`);
     const data = await readJsonResponse(response);
@@ -371,6 +398,12 @@ const runSearch = async (query) => {
     renderAnswer(data.answer);
     renderRelatedQuestions(data.relatedQuestions);
     renderResults(data.results);
+    if (data.answer?.text) {
+      lastConversation = {
+        lastQuery: cleanQuery,
+        lastAnswer: data.answer.text,
+      };
+    }
     if (hadAttachments) clearAttachments();
     setStatus("");
   } catch (error) {
@@ -427,6 +460,15 @@ fileInput.addEventListener("change", () => {
   renderAttachments();
   window.dispatchEvent(new CustomEvent("ai-activity"));
 });
+
+for (const button of fileModeRow.querySelectorAll("[data-file-mode]")) {
+  button.addEventListener("click", () => {
+    selectedFileMode =
+      selectedFileMode === button.dataset.fileMode ? "" : button.dataset.fileMode;
+    renderAttachments();
+    window.dispatchEvent(new CustomEvent("ai-activity"));
+  });
+}
 
 for (const button of document.querySelectorAll("[data-query]")) {
   button.addEventListener("click", () => runSearch(button.dataset.query));

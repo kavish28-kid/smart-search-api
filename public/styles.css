@@ -333,6 +333,31 @@ button {
   margin: 12px auto 0;
 }
 
+.file-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  width: min(760px, 100%);
+  margin: 10px auto 0;
+}
+
+.file-mode-row button {
+  min-height: 34px;
+  border-color: rgba(205, 170, 255, 0.18);
+  padding: 0 11px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.file-mode-row button:hover,
+.file-mode-row button.is-active {
+  border-color: rgba(255, 0, 200, 0.42);
+  background: rgba(255, 0, 200, 0.08);
+  color: var(--ink);
+}
+
 .attachment-chip {
   display: grid;
   grid-template-columns: 44px 1fr auto;
@@ -714,13 +739,32 @@ body.has-results .attach-menu {
 body.has-results .attachment-tray {
   position: fixed;
   left: 50%;
-  bottom: 80px;
+  bottom: 118px;
   z-index: 11;
   width: min(900px, calc(100% - 32px));
   max-height: 126px;
   margin: 0;
   overflow: auto;
   transform: translateX(-50%);
+}
+
+body.has-results .file-mode-row {
+  position: fixed;
+  left: 50%;
+  bottom: 80px;
+  z-index: 11;
+  justify-content: flex-start;
+  width: min(900px, calc(100% - 32px));
+  margin: 0;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  transform: translateX(-50%);
+}
+
+body.has-results .file-mode-row button {
+  flex: 0 0 auto;
+  min-height: 30px;
+  font-size: 12px;
 }
 
 body.has-results .attachment-chip {
@@ -899,7 +943,12 @@ body.has-results .result-item:first-child {
   }
 
   body.has-results .attachment-tray {
-    bottom: 72px;
+    bottom: 110px;
+    width: calc(100% - 18px);
+  }
+
+  body.has-results .file-mode-row {
+    bottom: 70px;
     width: calc(100% - 18px);
   }
 }

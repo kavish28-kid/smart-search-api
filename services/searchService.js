@@ -210,8 +210,30 @@ const formatAttachmentContext = (attachments = []) =>
     })
     .join("\n");
 
-const buildGeminiParts = (query, results, attachments) => {
+const fileModeInstructions = {
+  short: "Give a crisp summary with only the most important ideas.",
+  detailed: "Create detailed notes with headings, bullets, definitions, and examples.",
+  questions: "Extract important questions and answer them clearly.",
+  exam: "Create exam prep notes: key points, likely questions, quick revision bullets, and common mistakes.",
+  simple: "Explain it in very simple language with easy examples.",
+};
+
+const formatConversationContext = (context = null) => {
+  if (!context) return "";
+
+  const lastQuery = compactText(context.lastQuery || "").slice(0, 500);
+  const lastAnswer = compactText(context.lastAnswer || "").slice(0, 1800);
+
+  if (!lastQuery && !lastAnswer) return "";
+
+  return `Previous user query: ${lastQuery || "Unknown"}
+Previous AI answer excerpt: ${lastAnswer || "None"}`;
+};
+
+const buildGeminiParts = (query, results, attachments, options = {}) => {
   const intent = getQueryIntent(query);
+  const modeInstruction = fileModeInstructions[options.mode] || "";
+  const conversationContext = formatConversationContext(options.context);
   const context = results
     .slice(0, 6)
     .map((result, index) => `${index + 1}. ${result.title}: ${result.description}`)
@@ -221,8 +243,8 @@ const buildGeminiParts = (query, results, attachments) => {
     .filter((file) => file.inlineData?.data && file.inlineData?.mimeType)
     .slice(0, 4)
     .map((file) => ({
-      inlineData: {
-        mimeType: file.inlineData.mimeType,
+      inline_data: {
+        mime_type: file.inlineData.mimeType,
         data: file.inlineData.data,
       },
     }));
@@ -234,8 +256,10 @@ const buildGeminiParts = (query, results, attachments) => {
 Behavior:
 - If the user asks for jokes, fun, ideas, writing, or casual help, answer directly and creatively.
 - If the user asks for dating or love advice, be respectful and practical. Do not give manipulative tricks; help them build confidence, kindness, and honest conversation.
+- If previous context exists, treat the query as a follow-up and continue the same topic.
 - If the user asks for facts, use web sources and attached files when useful.
 - If attached files are present, use them first.
+- If a file mode is provided, follow it exactly.
 - Do not behave like a command parser. The answer should feel natural and helpful.
 
 Return:
@@ -246,6 +270,10 @@ Return:
 
 Query: ${query}
 Detected intent: ${intent}
+File mode instruction: ${modeInstruction || "None"}
+
+Conversation context:
+${conversationContext || "None"}
 
 Attached files:
 ${attachmentContext || "None"}
@@ -257,12 +285,15 @@ ${context || "None"}`,
   ];
 };
 
-const generateGeminiAnswer = async (query, results, attachments = []) => {
+const generateGeminiAnswer = async (query, results, attachments = [], options = {}) => {
   const intent = getQueryIntent(query);
 
   if (
     !process.env.GEMINI_API_KEY ||
-    (intent === "search" && results.length === 0 && attachments.length === 0)
+    (intent === "search" &&
+      results.length === 0 &&
+      attachments.length === 0 &&
+      !options.context)
   ) {
     return null;
   }
@@ -272,7 +303,7 @@ const generateGeminiAnswer = async (query, results, attachments = []) => {
     {
       contents: [
         {
-          parts: buildGeminiParts(query, results, attachments),
+          parts: buildGeminiParts(query, results, attachments, options),
         },
       ],
       generationConfig: {
@@ -293,6 +324,28 @@ const generateGeminiAnswer = async (query, results, attachments = []) => {
   return data.candidates?.[0]?.content?.parts?.[0]?.text || null;
 };
 
+const buildAttachmentFallbackAnswer = (attachments = []) => {
+  if (attachments.length === 0) return null;
+
+  const readableFiles = attachments.filter((file) => file.text);
+  const inlineFiles = attachments.filter((file) => file.inlineData?.data);
+
+  if (readableFiles.length > 0) {
+    return readableFiles
+      .map(
+        (file) =>
+          `${file.name || "Attached file"}:\n${compactText(file.text).slice(0, 1800)}`
+      )
+      .join("\n\n");
+  }
+
+  if (inlineFiles.length > 0) {
+    return "The file was attached and sent for AI reading, but Gemini did not return a readable explanation. Try a smaller PDF, a clearer scanned file, or ask a more specific question about the document.";
+  }
+
+  return "The file was attached, but this file type cannot be read directly yet. PDF and image files under 12 MB work best.";
+};
+
 const saveSearch = async (query) => {
   if (mongoose.connection.readyState !== 1) {
     return;
@@ -301,7 +354,7 @@ const saveSearch = async (query) => {
   await Search.create({ query });
 };
 
-exports.getResults = async (query, attachments = []) => {
+exports.getResults = async (query, attachments = [], options = {}) => {
   const cleanQuery = compactText(query);
 
   const searchSettled = await Promise.allSettled([
@@ -314,7 +367,9 @@ exports.getResults = async (query, attachments = []) => {
   );
 
   const results = rankAndDedupeResults(cleanQuery, rawResults);
-  const aiAnswer = await generateGeminiAnswer(cleanQuery, results, attachments).catch(() => null);
+  const aiAnswer =
+    (await generateGeminiAnswer(cleanQuery, results, attachments, options).catch(() => null)) ||
+    buildAttachmentFallbackAnswer(attachments);
   await saveSearch(cleanQuery).catch(() => null);
 
   return {
