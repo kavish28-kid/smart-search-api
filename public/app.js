@@ -44,6 +44,22 @@ const hideResults = () => {
   resultsSection.hidden = true;
 };
 
+const buildAttachmentQuery = () => {
+  if (attachedFiles.length === 0) return "";
+
+  const names = attachedFiles.map((item) => item.file.name).join(", ");
+  return `Explain the attached file${attachedFiles.length > 1 ? "s" : ""}: ${names}`;
+};
+
+const clearAttachments = () => {
+  for (const item of attachedFiles) {
+    URL.revokeObjectURL(item.url);
+  }
+
+  attachedFiles.length = 0;
+  renderAttachments();
+};
+
 const enterSearchMode = () => {
   document.body.classList.add("has-results");
   quickSearchRow.hidden = true;
@@ -322,8 +338,9 @@ const renderResults = (results) => {
 };
 
 const runSearch = async (query) => {
-  const cleanQuery = query.trim();
+  const cleanQuery = compactText(query) || buildAttachmentQuery();
   if (!cleanQuery) return;
+  const hadAttachments = attachedFiles.length > 0;
 
   enterSearchMode();
   input.value = "";
@@ -354,6 +371,7 @@ const runSearch = async (query) => {
     renderAnswer(data.answer);
     renderRelatedQuestions(data.relatedQuestions);
     renderResults(data.results);
+    if (hadAttachments) clearAttachments();
     setStatus("");
   } catch (error) {
     setStatus(error.message || "Search failed", true);
